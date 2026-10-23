@@ -400,7 +400,21 @@ function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 /* Regla A (correo): solo https://mail.google.com/… con authuser de la cuenta de usuario.
    Regla B (otros enlaces): solo https://; si no, se muestran como texto. Misma lógica en scripts/tasks.py. */
 var GMAIL_PREFIX='https://mail.google.com/';
-var GMAIL_AUTHUSERS=[]; /* versión web: sin cuenta incrustada => no se muestran botones de Gmail */
+var GMAIL_AUTHUSERS=[]; /* versión web: sin cuenta incrustada => la cuenta se lee del correo guardado en localStorage (campo "Tu correo de Gmail" de Conectar a GitHub); sin correo guardado no hay botones de Gmail */
+/* Si la lista incrustada está vacía (versión web), la cuenta se toma del correo guardado SOLO en este
+   navegador (localStorage, GMAILKEY); nunca va en S, Exportar JSON ni GitHub. Con lista incrustada
+   (versión del Mac) se usa siempre esa y el correo guardado no se lee. Se lee en cada llamada. */
+var GMAILKEY='tasks-web-v1:gmail';
+var GMAIL_ADDR_RE=/^[^\s\x40"'<>\\]+\x40[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/; // formato simple, sin caracteres raros
+function isValidGmailAddr(s){return typeof s==='string'&&s.length<=254&&GMAIL_ADDR_RE.test(s)&&!/[^\x21-\x7e]|[`&#?%]/.test(s);}
+function storedGmail(){
+  var m='';try{m=localStorage.getItem(GMAILKEY)||'';}catch(e){m='';}
+  m=String(m).trim().toLowerCase();return isValidGmailAddr(m)?m:'';
+}
+function gmailAuthusers(){
+  if(GMAIL_AUTHUSERS.length)return GMAIL_AUTHUSERS;
+  var m=storedGmail();return m?[m,m.replace('\x40','\x2540')]:[];
+}
 /* Host de una URL absoluta (sin usuario, puerto ni punto final; %xx decodificado), o null. */
 function urlHost(url){
   var m=/^[a-z][a-z0-9+.\-]*:\/\/([^\/\\?#]*)/i.exec(String(url||''));if(!m)return null;
@@ -415,11 +429,12 @@ function isAllowedGmailUrl(url){
   if(typeof url!=='string'||url.indexOf(GMAIL_PREFIX)!==0||/[^\x21-\x7e]|[\\<>"'`]/.test(url))return false;
   var hash=url.indexOf('#'),q=url.indexOf('?');
   if(q<0||(hash>=0&&hash<q))return false;
-  var parts=url.slice(q+1,hash<0?url.length:hash).split('&'),seen=false;
+  var parts=url.slice(q+1,hash<0?url.length:hash).split('&'),seen=false,users=gmailAuthusers();
+  if(!users.length)return false; // sin cuenta configurada: ningún Gmail es válido
   for(var i=0;i<parts.length;i++){
     var kv=parts[i],eq=kv.indexOf('='),k=(eq<0?kv:kv.slice(0,eq)).toLowerCase();
     if(k!=='authuser')continue;
-    if(GMAIL_AUTHUSERS.indexOf((eq<0?'':kv.slice(eq+1)).toLowerCase())<0)return false; // otra cuenta
+    if(users.indexOf((eq<0?'':kv.slice(eq+1)).toLowerCase())<0)return false; // otra cuenta
     seen=true;
   }
   return seen;
@@ -452,7 +467,8 @@ function legacyGmailToAuthuser(url){
       if(k.toLowerCase()==='authuser')return url; // ya trae authuser (propio o ajeno): no se toca
     }
   }
-  return 'https://mail.google.com/mail/?authuser='+GMAIL_AUTHUSERS[0]+'#'+frag;
+  var users=gmailAuthusers();if(!users.length)return url; // sin cuenta configurada: sin cambios
+  return 'https://mail.google.com/mail/?authuser='+users[0]+'#'+frag;
 }
 /* Función pura: PRIMER enlace de correo válido (Regla A): primero links[] tipo email y luego todas las
    URLs de Gmail de las notas; null si ninguno es válido. Cada candidato pasa antes por
@@ -1529,6 +1545,8 @@ function openGhModal(){
    '<label class="field full">Token de GitHub<input type="password" name="token" id="gh-token" autocomplete="off" spellcheck="false" placeholder="'+(on?'•••••••• (guardado)':'github_pat_…')+'"></label>'+
    '<label class="field">Repositorio<input name="repo" id="gh-repo" autocomplete="off" placeholder="dueño/repositorio" value="'+esc(c.repo)+'"></label>'+
    '<label class="field">Ruta del archivo<input name="path" id="gh-path" autocomplete="off" value="'+esc(c.path)+'"></label>'+
+   (GMAIL_AUTHUSERS.length?'':'<label class="field full">Tu correo de Gmail<input type="email" name="gmail" id="gh-gmail" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="email" placeholder="tu correo de Gmail" aria-describedby="gh-gmail-note" value="'+esc(storedGmail())+'"></label>'+
+    '<div class="form-note" id="gh-gmail-note">Se guarda solo en este navegador; se usa para los botones Abrir correo.</div>')+
    '<div class="form-note">El token queda guardado solo en este navegador (localStorage) y no se incluye en Exportar JSON.</div>'+
    '<div class="err" id="gh-err" role="alert"></div>'+
    '<div class="actions">'+(on?'<button type="button" class="btn" style="color:var(--red)" id="gh-disconnect">Desconectar</button><button type="button" class="btn" id="gh-modal-reload">⟳ Recargar desde GitHub</button>':'')+
@@ -1545,14 +1563,28 @@ function openGhModal(){
   form.addEventListener('submit',function(e){
     e.preventDefault();
     var tk=F.token.value.trim(),repo=F.repo.value.trim(),path=F.path.value.trim().replace(/^\/+/,''),err=document.getElementById('gh-err');
+    /* Correo (solo versión web): se valida y guarda ANTES que GitHub, así queda guardado aunque falte
+       el token, el repo sea inválido o la conexión falle. Inválido => mensaje y no se guarda nada. */
+    var mailNote='';
+    if(F.gmail){
+      var mail=F.gmail.value.trim().toLowerCase();
+      if(mail&&!isValidGmailAddr(mail)){err.textContent='Correo inválido: escribe solo tu dirección de Gmail (sin espacios ni comillas). No se guardó nada.';F.gmail.focus();return;}
+      if(mail!==storedGmail()){
+        try{if(mail)localStorage.setItem(GMAILKEY,mail);else localStorage.removeItem(GMAILKEY);}catch(x){}
+        mailNote=mail?'Correo guardado en este navegador.':'Correo borrado de este navegador.';
+        render(); // aparecen/desaparecen los botones Abrir correo
+      }
+    }
+    if(!tk&&!on&&mailNote&&!repo){closeModal();toast(mailNote);return;} // solo se cambió el correo
+    var fail=function(m){err.textContent=m+(mailNote?' ('+mailNote+')':'');};
     F.token.value='';
-    if(!tk&&!on){err.textContent='Ingresa el token.';F.token.focus();return;}
-    if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)){err.textContent='Repositorio inválido (formato dueño/nombre).';return;}
-    if(!/^[^\s]+\.json$/i.test(path)||path.split('/').indexOf('..')>=0){err.textContent='Ruta inválida (ej. data/tasks.json).';return;}
+    if(!tk&&!on){fail('Ingresa el token.');F.token.focus();return;}
+    if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)){fail('Repositorio inválido (formato dueño/nombre).');return;}
+    if(!/^[^\s]+\.json$/i.test(path)||path.split('/').indexOf('..')>=0){fail('Ruta inválida (ej. data/tasks.json).');return;}
     var prev=ghCfg(),changed=prev.repo!==repo||prev.path!==path;
     ghSaveCfg({token:tk||prev.token,repo:repo,path:path});tk='';
     if(changed||!on){GH.sha=null;var m=syncMeta();m.dirty=false;setSyncMeta(m);}
-    closeModal();renderGh();ghPull();
+    closeModal();renderGh();ghPull();if(mailNote)toast(mailNote);
   });
 }
 
