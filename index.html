@@ -495,9 +495,10 @@ function readSeed(){
   catch(e){console.warn('Semilla inválida',e);return {lists:[],tasks:[]};}
 }
 /* Proyectos fijos (cambio 4). Las listas de Google Tasks se conservan como origen oculto. */
-var P_CONT='p-contabilidad', P_PAY='p-payroll', P_ERP='p-erp', P_PAGOS='p-pagos';
+var P_CONT='p-contabilidad', P_PAY='p-payroll', P_ERP='p-erp', P_PAGOS='p-pagos', P_FACT='p-facturacion';
 var PROJECTS=[{id:P_CONT,title:'Contabilidad',color:'#6e4fe0'},{id:P_PAY,title:'Payroll',color:'#2f8f83'},
-  {id:P_ERP,title:'ERP Finanzas',color:'#3b7dd8'},{id:P_PAGOS,title:'Pagos',color:'#e0802a'}];
+  {id:P_ERP,title:'ERP Finanzas',color:'#3b7dd8'},{id:P_PAGOS,title:'Pagos',color:'#e0802a'},
+  {id:P_FACT,title:'Facturación',color:'#c2417a'}];
 var PAGOS_SRC_ID='(sin-lista-origen)';
 function isProjectId(id){for(var i=0;i<PROJECTS.length;i++)if(PROJECTS[i].id===id)return true;return false;}
 function isPagosSrc(id,title){return id===PAGOS_SRC_ID||/^\s*pagos\s*$/i.test(String(title||''));}
@@ -632,6 +633,7 @@ function todaySantiago(){
    de la semana de rule.start (o de la base); mensual con monthDay = ese día (o el último) o 'last'. */
 function nextDue(due,repeat,today,rule){
   var base=due||today||todaySantiago(),r=rule||{},n=r.interval||1;
+  if(r.businessDay)return nextDueHabil(base,repeat,r,n);
   if(repeat==='daily')return fromDn(dn(base)+n);
   if(repeat==='weekly'){
     if(!r.weekdays||!r.weekdays.length)return fromDn(dn(base)+7*n);
@@ -641,8 +643,41 @@ function nextDue(due,repeat,today,rule){
       if(r.weekdays.indexOf(iso(d))>=0&&(((mon-anchor)/7)%n+n)%n===0)return fromDn(d);}
   }
   var p=base.split('-'),k=+p[0]*12+(+p[1]-1)+n,y=Math.floor(k/12),m=k%12+1;
-  var last=new Date(Date.UTC(y,m,0)).getUTCDate(),md=r.monthDay;
-  return y+'-'+pad(m)+'-'+pad(md==='last'?last:Math.min(md||+p[2],last));
+  var last=new Date(Date.UTC(y,m,0)).getUTCDate(),md=r.monthDay,day=md==='last'?last:Math.min(md||+p[2],last);
+  if(r.weekday&&WEEKDAY_POS.indexOf(r.weekdayPos)>=0)return monthWeekday(y,m,day,r.weekday,r.weekdayPos);
+  return y+'-'+pad(m)+'-'+pad(day);
+}
+/* Feriados nacionales de Chile (igual que FERIADOS_CL de la CLI) */
+var FERIADOS_CL='2026-01-01 2026-04-03 2026-04-04 2026-05-01 2026-05-21 2026-06-21 2026-06-29 2026-07-16 2026-08-15 2026-09-18 2026-09-19 2026-10-12 2026-10-31 2026-11-01 2026-12-08 2026-12-25 2027-01-01 2027-03-26 2027-03-27 2027-05-01 2027-05-21 2027-06-21 2027-06-28 2027-07-16 2027-08-15 2027-09-18 2027-09-19 2027-10-11 2027-10-31 2027-11-01 2027-12-08 2027-12-25 2028-01-01 2028-04-14 2028-04-15 2028-05-01 2028-05-21 2028-06-20 2028-06-26 2028-07-16 2028-08-15 2028-09-18 2028-09-19 2028-10-09 2028-10-27 2028-11-01 2028-12-08 2028-12-25'.split(' ');
+var WEEKDAY_POS=['first','nearest','before','penultimate'];
+/* Día hábil: lun-vie y no feriado de Chile (igual que es_habil / ajustar_habil de la CLI). Fechas YYYY-MM-DD. */
+function isoDow(s){return ((dn(s)+3)%7+7)%7+1;}
+function esHabil(s){return isoDow(s)<=5&&FERIADOS_CL.indexOf(s)<0;}
+function ajustarHabil(s,mismoMes){var r=s;while(!esHabil(r))r=fromDn(dn(r)-1);
+  if(mismoMes&&r.slice(0,7)!==s.slice(0,7)){r=s;while(!esHabil(r))r=fromDn(dn(r)+1);}return r;}
+/* Siguiente plazo con repeatRule.businessDay (igual que _next_due_habil de la CLI) */
+function nextDueHabil(base,repeat,r,n){
+  if(repeat==='daily'){var d=fromDn(dn(base)+n);while(!esHabil(d))d=fromDn(dn(d)+1);return d;}
+  var o={};Object.keys(r).forEach(function(k){o[k]=r[k];});o.businessDay=false;
+  if(repeat==='weekly'){
+    var wds=r.weekdays&&r.weekdays.length?r.weekdays:[isoDow(r.start||base)];o.weekdays=wds;
+    if(wds.indexOf(isoDow(base))<0)for(var i=1;i<7;i++){var c=fromDn(dn(base)+i);if(wds.indexOf(isoDow(c))>=0&&ajustarHabil(c)===base){base=c;break;}}
+    return ajustarHabil(nextDue(base,'weekly',null,o));
+  }
+  return ajustarHabil(nextDue(base,'monthly',null,o),true);
+}
+/* Día wd (1=lun..7=dom) del mes según pos (igual que month_weekday de la CLI): first = primero del mes;
+   before = último en o antes de day (si no hay, el primero); nearest = más cercano a day (empate: el anterior).
+   Si cae en feriado o fin de semana, se adelanta al día hábil anterior del mismo mes. */
+function monthWeekday(y,m,day,wd,pos){
+  var last=new Date(Date.UTC(y,m,0)).getUTCDate(),ds=[],iso=function(d){var x=new Date(Date.UTC(y,m-1,d)).getUTCDay();return x||7;};
+  for(var d=1;d<=last;d++)if(iso(d)===wd)ds.push(d);
+  var r;
+  if(pos==='first')r=ds[0];
+  else if(pos==='penultimate')r=ds[ds.length-2];
+  else if(pos==='before'){var c=ds.filter(function(x){return x<=day;});r=c.length?c[c.length-1]:ds[0];}
+  else{r=ds[0];ds.forEach(function(x){var a=Math.abs(x-day),b=Math.abs(r-day);if(a<b||(a===b&&x<r))r=x;});}
+  return ajustarHabil(y+'-'+pad(m)+'-'+pad(r),true);
 }
 /* repeatRule saneada (misma lógica que clean_rule de la CLI); omite valores por defecto; null si queda vacía */
 function isYmd(v){return typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v)&&fromDn(dn(v))===v;}
@@ -652,7 +687,9 @@ function normRepeatRule(repeat,r){
   var o={},iv=ruleInt(r.interval,1);if(iv&&iv>1)o.interval=iv;
   if(repeat==='weekly'&&Array.isArray(r.weekdays)){var wd=[];r.weekdays.forEach(function(x){x=ruleInt(x,1,7);if(x&&wd.indexOf(x)<0)wd.push(x);});
     if(wd.length)o.weekdays=wd.sort(function(a,b){return a-b;});}
-  if(repeat==='monthly'){var md=r.monthDay==='last'?'last':ruleInt(r.monthDay,1,31);if(md)o.monthDay=md;}
+  if(repeat==='monthly'){var md=r.monthDay==='last'?'last':ruleInt(r.monthDay,1,31);if(md)o.monthDay=md;
+    var wk=ruleInt(r.weekday,1,7);if(wk&&WEEKDAY_POS.indexOf(r.weekdayPos)>=0){o.weekday=wk;o.weekdayPos=r.weekdayPos;}}
+  if(r.businessDay===true)o.businessDay=true;
   if(isYmd(r.start))o.start=r.start;
   if(r.endType==='date'&&isYmd(r.endDate)){o.endType='date';o.endDate=r.endDate;}
   else if(r.endType==='count'&&ruleInt(r.count,1)){o.endType='count';o.count=r.count;}
@@ -674,6 +711,8 @@ function repeatSummary(repeat,rule){
   var r=rule||{},n=r.interval||1,s=n===1?REPEATS[repeat].toLowerCase():'cada '+n+' '+REPEAT_UNITS[repeat];
   if(r.weekdays&&r.weekdays.length)s+=': '+r.weekdays.map(function(d){return WEEKDAYS[d-1];}).join(', ');
   if(r.monthDay)s+=r.monthDay==='last'?' último día':' día '+r.monthDay;
+  if(r.weekday&&r.weekdayPos){var w=WEEKDAYS[r.weekday-1];s+={first:' · 1er '+w+' del mes',nearest:' · '+w+' más cercano',before:' · '+w+' anterior',penultimate:' · penúltimo '+w+' del mes'}[r.weekdayPos];}
+  if(r.businessDay)s+=' · días hábiles';
   if(r.endType==='date')s+=' · hasta '+r.endDate;else if(r.endType==='count')s+=' · '+(r.occurrence||1)+'/'+r.count+' repeticiones';
   return s;
 }
@@ -1340,6 +1379,10 @@ function repeatFormHtml(t){
     '<div class="rep-row" id="m-rep-week"'+(rep==='weekly'?'':' hidden')+'><span id="m-rep-week-l">Días</span><div class="rep-days" role="group" aria-labelledby="m-rep-week-l">'+
       'LMMJVSD'.split('').map(function(c,i){var on=(r.weekdays||[]).indexOf(i+1)>=0;return '<button type="button" class="rep-day" data-wd="'+(i+1)+'" aria-pressed="'+on+'" aria-label="'+WD_FULL[i]+'" title="'+WD_FULL[i]+'">'+c+'</button>';}).join('')+'</div></div>'+
     '<label class="rep-row" id="m-rep-month"'+(rep==='monthly'?'':' hidden')+'>Día del mes<select name="repMonthDay">'+md+'</select></label>'+
+    '<div class="rep-row" id="m-rep-month-wd"'+(rep==='monthly'?'':' hidden')+'><label for="m-rep-wdpos">Mover a</label><select id="m-rep-wdpos" name="repWdPos"><option value="">No mover</option>'+
+      [['first','el primer'],['nearest','el más cercano'],['before','el anterior o igual'],['penultimate','el penúltimo del mes']].map(function(o){return '<option value="'+o[0]+'"'+(r.weekdayPos===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+
+      '</select><select name="repWd" aria-label="Día de la semana">'+WD_FULL.map(function(w,i){return '<option value="'+(i+1)+'"'+((r.weekday||4)===i+1?' selected':'')+'>'+w+'</option>';}).join('')+'</select></div>'+
+    '<label class="rep-row"><input type="checkbox" name="repHabil"'+(r.businessDay?' checked':'')+'> Solo días hábiles (si cae en fin de semana o feriado, el día hábil anterior)</label>'+
     '<label class="rep-row">Comienza<input type="date" name="repStart" data-had="'+(r.start?1:0)+'" value="'+esc(r.start||t.due||T())+'"></label>'+
     '<fieldset class="rep-end"><legend>Finaliza</legend>'+
       '<label>'+radio('never','Nunca')+'</label>'+
@@ -1350,7 +1393,7 @@ function repeatFormHtml(t){
 function bindRepeatForm(form){
   var F=form.elements,box=form.querySelector('#m-rep');
   F.repeat.addEventListener('change',function(){var v=F.repeat.value;
-    form.querySelector('#m-rep-body').hidden=!v;form.querySelector('#m-rep-week').hidden=v!=='weekly';form.querySelector('#m-rep-month').hidden=v!=='monthly';
+    form.querySelector('#m-rep-body').hidden=!v;form.querySelector('#m-rep-week').hidden=v!=='weekly';form.querySelector('#m-rep-month').hidden=v!=='monthly';form.querySelector('#m-rep-month-wd').hidden=v!=='monthly';
     form.querySelector('#m-rep-unit').textContent=REP_UNITS[v]||'';});
   box.addEventListener('click',function(e){var b=e.target.closest('.rep-day');if(b)b.setAttribute('aria-pressed',String(b.getAttribute('aria-pressed')!=='true'));});
   /* Escribir en la fecha o en el número de fin elige esa opción */
@@ -1365,6 +1408,11 @@ function readRepeatForm(form,oldRule){
   var r={interval:+iv},st=F.repStart.value;
   if(rep==='weekly')r.weekdays=[].map.call(form.querySelectorAll('.rep-day[aria-pressed="true"]'),function(b){return +b.getAttribute('data-wd');});
   if(rep==='monthly'&&F.repMonthDay.value)r.monthDay=F.repMonthDay.value==='last'?'last':+F.repMonthDay.value;
+  if(rep==='monthly'&&F.repWdPos&&F.repWdPos.value){r.weekdayPos=F.repWdPos.value;r.weekday=+F.repWd.value;}
+  if(F.repHabil&&F.repHabil.checked){r.businessDay=true;var dueV=form.elements.due&&form.elements.due.value;
+    /* ancla igual que anclar_habil de la CLI: el ajuste a día hábil no desplaza la serie */
+    if(dueV&&isYmd(dueV)){if(rep==='weekly'&&!r.weekdays.length)r.weekdays=[isoDow(dueV)];
+      if(rep==='monthly'&&!r.monthDay&&!r.weekdayPos)r.monthDay=+dueV.slice(8,10);}}
   if(st&&!isYmd(st))return {error:'La fecha de inicio de la repetición no es válida.',el:F.repStart};
   /* Comienza solo se guarda si ya existía o si se cambió (las tareas antiguas no cambian al guardar) */
   if(st&&(F.repStart.getAttribute('data-had')==='1'||st!==F.repStart.defaultValue))r.start=st;
